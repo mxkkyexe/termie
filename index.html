@@ -16,9 +16,11 @@
   body { color: var(--fg); font: 15px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; -webkit-font-smoothing: antialiased;
          display: grid; place-items: center; padding: 24px 16px; }
   main { width: 100%; max-width: 560px; display: flex; flex-direction: column; align-items: center; }
-  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; }
-  /* the full stop: an inline box sits on the baseline by its bottom edge, so the cube's lowest corner rests on the line */
-  h1 canvas { display: inline-block; vertical-align: baseline; width: 0.4em; height: 0.4em; margin-left: 0.05em; }
+  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; position: relative; }
+  /* the full stop: an empty inline box marks the baseline (browsers disagree on where a canvas sits), and the
+     script puts the cube's lowest corner exactly on it */
+  h1 .stop { display: inline-block; width: 0.45em; height: 0; }
+  h1 canvas { position: absolute; width: 0.4em; height: 0.4em; }
   .lede { color: var(--fg2); margin: 18px 0 40px; text-align: center; }
   .label { color: var(--fg3); font-size: 13px; align-self: flex-start; margin-bottom: 8px; }
   .box { width: 100%; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; }
@@ -47,7 +49,7 @@
 </head>
 <body>
 <main>
-  <h1>termie<canvas id="cube" aria-hidden="true"></canvas></h1>
+  <h1>termie<span class="stop" id="stop"></span><canvas id="cube" aria-hidden="true"></canvas></h1>
   <p class="lede">your terminal, pocket-sized.</p>
   <p class="label">on your computer, run:</p>
   <div class="box">
@@ -99,7 +101,14 @@ function pose(ms) {
   return iso;
 }
 
-const canvas = document.getElementById("cube"), ctx = canvas.getContext("2d");
+const canvas = document.getElementById("cube"), ctx = canvas.getContext("2d"), stop = document.getElementById("stop");
+const REST = 1 / 3.6 * Math.sqrt(8 / 3);   // the resting cube's lowest corner, below the canvas centre, as a share of its size
+function place() {   // the marker's top is the baseline: the cube's lowest corner goes there
+  const s = canvas.offsetHeight;
+  canvas.style.left = stop.offsetLeft + 0.05 * s / 0.4 + "px";
+  canvas.style.top = stop.offsetTop - s / 2 - REST * s + "px";
+}
+place(); document.fonts?.ready.then(place); addEventListener("resize", place);
 const still = matchMedia("(prefers-reduced-motion: reduce)");
 function draw(ms) {
   const box = canvas.clientWidth, dpr = devicePixelRatio || 1;
