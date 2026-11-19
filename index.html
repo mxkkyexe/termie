@@ -21,6 +21,10 @@
   #cube { width: 220px; height: 220px; touch-action: none; cursor: grab; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
   #cube.held { cursor: grabbing; }
   .lede { color: var(--fg2); margin: 18px 0 40px; text-align: center; }
+  .tabs { align-self: stretch; display: flex; margin-bottom: 14px; }
+  .tabs button { flex: 1; min-height: 36px; border-radius: 0; }
+  .tabs button + button { border-left: none; }
+  .tabs button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .label { color: var(--fg3); font-size: 13px; align-self: flex-start; margin-bottom: 8px; }
   .box { width: 100%; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; }
   .box code { flex: 1; font: inherit; font-size: 14px; overflow-wrap: break-word; }
@@ -33,13 +37,14 @@
   button.done { color: var(--mint); border-color: var(--mint); }
   #share { display: none; }
   .after { color: var(--fg2); font-size: 13px; margin-top: 12px; align-self: flex-start; }
-  .needs { align-self: stretch; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .needs { align-self: stretch; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }   /* the same gap either side of the line */
   .needs h2 { font: inherit; font-size: 13px; color: var(--fg3); font-weight: 400; margin-bottom: 10px; }
   .needs ul { list-style: none; padding: 0; display: grid; gap: 8px; font-size: 13px; }
   .needs li { display: grid; grid-template-columns: 18px 1fr; color: var(--fg2); }
   .needs li::before { content: ""; width: 7px; height: 8px; margin-top: 6px; background: var(--fg3);   /* Termie's hexagon bullet */
                      clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
   .needs li span { color: var(--fg3); }
+  .needs li[hidden] { display: none; }
   @media (max-width: 560px) {
     body { place-items: start center; padding: max(12vh, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
     #cube { width: 190px; height: 190px; }
@@ -57,21 +62,25 @@
   <h1 class="sr">termie</h1>
   <canvas id="cube" role="img" aria-label="The Termie cube. Drag to spin it."></canvas>
   <p class="lede">your terminal, pocket-sized.</p>
-  <p class="label">on your computer, run:</p>
+  <div class="tabs" role="group" aria-label="Your computer">
+    <button type="button" data-os="unix" aria-pressed="true">mac · linux</button>
+    <button type="button" data-os="windows" aria-pressed="false">windows</button>
+  </div>
+  <p class="label" id="where">in a terminal on your computer:</p>
   <div class="box">
-    <code><span class="p">$ </span><span id="cmd">curl -fsSL https://<wbr>mxkkyexe.github.io/<wbr>termie/<wbr>install.sh | sh</span></code>
+    <code><span class="p" id="prompt">$ </span><span id="cmd">curl -fsSL https://<wbr>mxkkyexe.github.io/<wbr>termie/<wbr>install.sh | sh</span></code>
     <div class="actions">
       <button id="copy" type="button">copy</button>
       <button id="share" type="button">send to computer</button>
     </div>
   </div>
-  <p class="after">it installs termie, then shows a qr code. scan it in the app.</p>
+  <p class="after">then scan the qr code with termie.</p>
   <section class="needs">
     <h2>you'll need</h2>
     <ul>
-      <li><p>a mac or linux computer <span>· on windows, inside wsl</span></p></li>
-      <li><p>tailscale on it and on your iphone <span>· the same account</span></p></li>
-      <li><p>ssh turned on, python 3 and qrencode <span>· if one's missing, termie says what to run</span></p></li>
+      <li><p>tailscale on the computer and your phone</p></li>
+      <li><p>ssh turned on <span>· termie checks the rest</span></p></li>
+      <li id="wsl" hidden><p>wsl, with tailscale and ssh inside it</p></li>
     </ul>
   </section>
 </main>
@@ -202,8 +211,23 @@ function draw(m) {
 }
 requestAnimationFrame(frame);
 
-// ---- the command ----
-const btn = document.getElementById("copy"), cmd = document.getElementById("cmd").textContent;
+// ---- the command: one per kind of computer; Windows runs the same installer inside WSL ----
+const btn = document.getElementById("copy"), cmdEl = document.getElementById("cmd");
+const commands = {
+  unix: { where: "in a terminal on your computer:", prompt: "$ ", html: cmdEl.innerHTML },
+  windows: { where: "in powershell on your pc:", prompt: "> ", html: 'wsl -e sh -c "curl -fsSL https://<wbr>mxkkyexe.github.io/<wbr>termie/<wbr>install.sh | sh"' },
+};
+let cmd = cmdEl.textContent;
+function choose(os) {
+  const c = commands[os];
+  document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.os === os)));
+  document.getElementById("where").textContent = c.where;
+  document.getElementById("prompt").textContent = c.prompt;
+  cmdEl.innerHTML = c.html; cmd = cmdEl.textContent;
+  document.getElementById("wsl").hidden = os !== "windows";
+}
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => choose(b.dataset.os)));
+if (/Windows/i.test(navigator.userAgent)) choose("windows");   // a visitor on a PC starts on its tab
 if (navigator.share && matchMedia("(pointer: coarse)").matches) {   // a phone: hand the line to Messages, Mail, AirDrop…
   document.documentElement.classList.add("can-share");
   document.getElementById("share").addEventListener("click", () => navigator.share({ text: cmd }).catch(() => {}));
