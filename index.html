@@ -16,11 +16,10 @@
   body { color: var(--fg); font: 15px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; -webkit-font-smoothing: antialiased;
          display: grid; place-items: center; padding: 24px 16px; }
   main { width: 100%; max-width: 560px; display: flex; flex-direction: column; align-items: center; }
-  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; position: relative; }
-  /* the full stop: an empty inline box marks the baseline (browsers disagree on where a canvas sits), and the
-     script puts the cube's lowest corner exactly on it */
-  h1 .stop { display: inline-block; width: 0.45em; height: 0; }
-  h1 canvas { position: absolute; width: 0.4em; height: 0.4em; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  /* the cube: grab it and spin it; let go and it coasts, then settles and carries on tipping */
+  #cube { width: 220px; height: 220px; touch-action: none; cursor: grab; -webkit-tap-highlight-color: transparent; user-select: none; -webkit-user-select: none; }
+  #cube.held { cursor: grabbing; }
   .lede { color: var(--fg2); margin: 18px 0 40px; text-align: center; }
   .label { color: var(--fg3); font-size: 13px; align-self: flex-start; margin-bottom: 8px; }
   .box { width: 100%; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; }
@@ -34,11 +33,10 @@
   button.done { color: var(--mint); border-color: var(--mint); }
   #share { display: none; }
   .foot { color: var(--fg3); font-size: 13px; margin-top: 12px; align-self: flex-start; }
-  /* phones: on the phone, the command still runs on the computer, so it can be sent there; big targets, the command alone in its box */
   @media (max-width: 560px) {
-    body { place-items: start center; padding: max(18vh, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
-    h1 { font-size: 46px; letter-spacing: -1.4px; }
-    .lede { margin: 14px 0 34px; }
+    body { place-items: start center; padding: max(12vh, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+    #cube { width: 190px; height: 190px; }
+    .lede { margin: 10px 0 34px; }
     .box { flex-direction: column; gap: 14px; }
     .box code { font-size: 13px; line-height: 1.6; }
     .actions { width: 100%; }
@@ -49,7 +47,8 @@
 </head>
 <body>
 <main>
-  <h1>termie<span class="stop" id="stop"></span><canvas id="cube" aria-hidden="true"></canvas></h1>
+  <h1 class="sr">termie</h1>
+  <canvas id="cube" role="img" aria-label="The Termie cube. Drag to spin it."></canvas>
   <p class="lede">your terminal, pocket-sized.</p>
   <p class="label">on your computer, run:</p>
   <div class="box">
@@ -62,7 +61,8 @@
   <p class="foot">mac or linux · needs tailscale and ssh · on windows, inside wsl</p>
 </main>
 <script>
-// The app's cube: a real cube seen isometrically, tipping like a die (up, left, down, right) with a 2 s rest after each.
+// ---- the app's cube: seen isometrically, tipping like a die (up, left, down, right), resting 2 s after each ----
+const I3 = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 const iso = mul(rot([1, 0, 0], -35.264), rot([0, 1, 0], 45));
 const upright = [0, 0.8165, -0.5774];
 const cycle = [
@@ -82,15 +82,16 @@ const faces = [   // normal, corners, colour (0 top, 1 side a, 2 side b)
 ];
 const colours = ["#a3e6c4", "#5fb88f", "#3b8462"];
 
-function mul(a, b) { return a.map((row, i) => [0, 1, 2].map(j => row[0] * b[0][j] + row[1] * b[1][j] + row[2] * b[2][j])); }
+function mul(a, b) { return a.map(row => [0, 1, 2].map(j => row[0] * b[0][j] + row[1] * b[1][j] + row[2] * b[2][j])); }
 function apply(m, v) { return m.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]); }
+function tr(m) { return [0, 1, 2].map(i => [0, 1, 2].map(j => m[j][i])); }
 function rot(axis, deg) {
   const l = Math.hypot(...axis), [x, y, z] = axis.map(c => c / l), a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), t = 1 - c;
   return [[t*x*x + c, t*x*y - s*z, t*x*z + s*y], [t*x*y + s*z, t*y*y + c, t*y*z - s*x], [t*x*z - s*y, t*y*z + s*x, t*z*z + c]];
 }
 const ease = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
-function pose(ms) {
-  let t = ms % loop, s = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+function loopPose(ms) {
+  let t = ms % loop, s = I3;
   for (let i = 0; i < 8; i++) {
     const tip = cycle[i % 4];
     if (t < tip.ms) return mul(mul(rot(tip.axis, tip.deg * ease(t / tip.ms)), iso), s);
@@ -101,19 +102,81 @@ function pose(ms) {
   return iso;
 }
 
-const canvas = document.getElementById("cube"), ctx = canvas.getContext("2d"), stop = document.getElementById("stop");
-const REST = 1 / 3.6 * Math.sqrt(8 / 3);   // the resting cube's lowest corner, below the canvas centre, as a share of its size
-function place() {   // the marker's top is the baseline: the cube's lowest corner goes there
-  const s = canvas.offsetHeight;
-  canvas.style.left = stop.offsetLeft + 0.05 * s / 0.4 + "px";
-  canvas.style.top = stop.offsetTop - s / 2 - REST * s + "px";
+// the 24 ways a cube can sit (signed permutation matrices with determinant +1): where a spin settles
+const sits = [];
+for (const p of [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]])
+  for (let signs = 0; signs < 8; signs++) {
+    const m = [0, 1, 2].map(r => [0, 1, 2].map(c => c === p[r] ? ((signs >> r) & 1 ? -1 : 1) : 0));
+    const det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    if (det > 0) sits.push(m);
+  }
+function nearestSit(m) {   // the resting pose iso·Q closest to m
+  let best = sits[0], score = -Infinity;
+  for (const q of sits) { const t = mul(iso, q); let d = 0; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) d += t[i][j] * m[i][j]; if (d > score) { score = d; best = q; } }
+  return best;
 }
-place(); document.fonts?.ready.then(place); addEventListener("resize", place);
+function axisAngle(d) {   // the turn that rotation d makes
+  const a = Math.acos(Math.max(-1, Math.min(1, (d[0][0] + d[1][1] + d[2][2] - 1) / 2)));
+  if (a < 1e-6) return { axis: [0, 0, 1], deg: 0 };
+  return { axis: [d[2][1] - d[1][2], d[0][2] - d[2][0], d[1][0] - d[0][1]], deg: a * 180 / Math.PI };
+}
+
+// ---- state: tipping on its own, held, coasting after a throw, or settling into a sit ----
+const canvas = document.getElementById("cube"), ctx = canvas.getContext("2d");
 const still = matchMedia("(prefers-reduced-motion: reduce)");
-function draw(ms) {
+let mode = "auto", sit = I3, loopStart = performance.now(), shown = iso;
+let vx = 0, vy = 0, last = null, settle = null;
+const K = 0.55;   // degrees per pixel dragged
+
+function spin(m, dx, dy) { return mul(mul(rot([0, 1, 0], dx * K), rot([1, 0, 0], -dy * K)), m); }
+
+canvas.addEventListener("pointerdown", e => {
+  canvas.setPointerCapture(e.pointerId); canvas.classList.add("held");
+  mode = "held"; vx = vy = 0; last = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+});
+canvas.addEventListener("pointermove", e => {
+  if (mode !== "held" || !last) return;
+  const dx = e.clientX - last.x, dy = e.clientY - last.y, dt = Math.max(1, e.timeStamp - last.t);
+  shown = spin(shown, dx, dy);
+  vx = 0.7 * vx + 0.3 * dx / dt; vy = 0.7 * vy + 0.3 * dy / dt;   // px per ms, smoothed
+  last = { x: e.clientX, y: e.clientY, t: e.timeStamp };
+});
+function release() {
+  if (mode !== "held") return;
+  canvas.classList.remove("held"); last = null;
+  mode = Math.hypot(vx, vy) > 0.05 ? "coast" : "settling";
+  if (mode === "settling") beginSettle();
+}
+canvas.addEventListener("pointerup", release);
+canvas.addEventListener("pointercancel", release);
+
+function beginSettle() {
+  const q = nearestSit(shown), target = mul(iso, q);
+  settle = { from: shown, turn: axisAngle(mul(target, tr(shown))), q, t0: performance.now(), ms: 520 };
+  mode = "settling";
+}
+
+let prev = performance.now();
+function frame(now) {
+  const dt = Math.min(48, now - prev); prev = now;
+  if (mode === "auto") shown = still.matches ? mul(iso, sit) : mul(loopPose(now - loopStart), sit);
+  else if (mode === "coast") {
+    shown = spin(shown, vx * dt, vy * dt);
+    const f = Math.pow(0.994, dt); vx *= f; vy *= f;   // friction: a hard flick spins for a second or two
+    if (Math.hypot(vx, vy) < 0.04) beginSettle();
+  } else if (mode === "settling") {
+    const p = Math.min(1, (now - settle.t0) / settle.ms), e = 1 - Math.pow(1 - p, 3);
+    shown = mul(rot(settle.turn.axis, settle.turn.deg * e), settle.from);
+    if (p >= 1) { sit = settle.q; shown = mul(iso, sit); mode = "auto"; loopStart = now; }   // carries on tipping from where it sat
+  }
+  draw(shown);
+  requestAnimationFrame(frame);
+}
+
+function draw(m) {
   const box = canvas.clientWidth, dpr = devicePixelRatio || 1;
   if (canvas.width !== Math.round(box * dpr)) { canvas.width = canvas.height = Math.round(box * dpr); }
-  const size = canvas.width, h = size / 3.6, c = size / 2, m = still.matches ? iso : pose(ms);
+  const size = canvas.width, h = size / 4.4, c = size / 2;   // room for the corners whichever way it's turned
   ctx.clearRect(0, 0, size, size);
   for (const [n, corners, role] of faces) {
     if (apply(m, n)[2] <= 1e-6) continue;   // facing away: never drawn
@@ -121,10 +184,10 @@ function draw(ms) {
     corners.forEach((v, i) => { const p = apply(m, v); i ? ctx.lineTo(c + p[0] * h, c + p[1] * h) : ctx.moveTo(c + p[0] * h, c + p[1] * h); });
     ctx.closePath(); ctx.fillStyle = colours[role]; ctx.fill();
   }
-  requestAnimationFrame(draw);
 }
-requestAnimationFrame(draw);
+requestAnimationFrame(frame);
 
+// ---- the command ----
 const btn = document.getElementById("copy"), cmd = document.getElementById("cmd").textContent;
 if (navigator.share && matchMedia("(pointer: coarse)").matches) {   // a phone: hand the line to Messages, Mail, AirDrop…
   document.documentElement.classList.add("can-share");
