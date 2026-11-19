@@ -16,28 +16,46 @@
   body { color: var(--fg); font: 15px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; -webkit-font-smoothing: antialiased;
          display: grid; place-items: center; padding: 24px 16px; }
   main { width: 100%; max-width: 560px; display: flex; flex-direction: column; align-items: center; }
-  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; display: flex; align-items: flex-end; gap: 4px; }
-  h1 canvas { width: 22px; height: 22px; margin-bottom: 4px; }
+  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; }
+  /* the full stop: an inline box sits on the baseline by its bottom edge, so the cube's lowest corner rests on the line */
+  h1 canvas { display: inline-block; vertical-align: baseline; width: 0.4em; height: 0.4em; margin-left: 0.05em; }
   .lede { color: var(--fg2); margin: 18px 0 40px; text-align: center; }
+  .label { color: var(--fg3); font-size: 13px; align-self: flex-start; margin-bottom: 8px; }
   .box { width: 100%; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; }
-  .box code { flex: 1; font: inherit; font-size: 14px; overflow-wrap: anywhere; }
+  .box code { flex: 1; font: inherit; font-size: 14px; overflow-wrap: break-word; }
   .box code .p { color: var(--fg3); }
+  .actions { display: flex; gap: 10px; flex: none; }
   button { font: inherit; font-size: 13px; color: var(--fg2); background: none; border: 1px solid var(--line); padding: 4px 12px;
-           cursor: pointer; flex: none; transition: color 160ms ease, border-color 160ms ease; }
+           cursor: pointer; transition: color 160ms ease, border-color 160ms ease; -webkit-tap-highlight-color: transparent; }
   button:hover { color: var(--fg); border-color: var(--fg3); }
   button:active { transform: scale(0.97); }
   button.done { color: var(--mint); border-color: var(--mint); }
+  #share { display: none; }
   .foot { color: var(--fg3); font-size: 13px; margin-top: 12px; align-self: flex-start; }
-  @media (max-width: 420px) { h1 { font-size: 44px; } h1 canvas { width: 18px; height: 18px; margin-bottom: 3px; } }
+  /* phones: on the phone, the command still runs on the computer, so it can be sent there; big targets, the command alone in its box */
+  @media (max-width: 560px) {
+    body { place-items: start center; padding: max(18vh, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+    h1 { font-size: 46px; letter-spacing: -1.4px; }
+    .lede { margin: 14px 0 34px; }
+    .box { flex-direction: column; gap: 14px; }
+    .box code { font-size: 13px; line-height: 1.6; }
+    .actions { width: 100%; }
+    .actions button { flex: 1; min-height: 44px; font-size: 14px; }
+    .can-share #share { display: block; }
+  }
 </style>
 </head>
 <body>
 <main>
   <h1>termie<canvas id="cube" aria-hidden="true"></canvas></h1>
   <p class="lede">your terminal, pocket-sized.</p>
+  <p class="label">on your computer, run:</p>
   <div class="box">
-    <code><span class="p">$ </span><span id="cmd">curl -fsSL https://mxkkyexe.github.io/termie/install.sh | sh</span></code>
-    <button id="copy" type="button">copy</button>
+    <code><span class="p">$ </span><span id="cmd">curl -fsSL https://<wbr>mxkkyexe.github.io/<wbr>termie/<wbr>install.sh | sh</span></code>
+    <div class="actions">
+      <button id="copy" type="button">copy</button>
+      <button id="share" type="button">send to computer</button>
+    </div>
   </div>
   <p class="foot">mac or linux · needs tailscale and ssh · on windows, inside wsl</p>
 </main>
@@ -86,7 +104,7 @@ const still = matchMedia("(prefers-reduced-motion: reduce)");
 function draw(ms) {
   const box = canvas.clientWidth, dpr = devicePixelRatio || 1;
   if (canvas.width !== Math.round(box * dpr)) { canvas.width = canvas.height = Math.round(box * dpr); }
-  const size = canvas.width, h = size / 1.6 / 2, c = size / 2, m = still.matches ? iso : pose(ms);
+  const size = canvas.width, h = size / 3.6, c = size / 2, m = still.matches ? iso : pose(ms);
   ctx.clearRect(0, 0, size, size);
   for (const [n, corners, role] of faces) {
     if (apply(m, n)[2] <= 1e-6) continue;   // facing away: never drawn
@@ -99,6 +117,10 @@ function draw(ms) {
 requestAnimationFrame(draw);
 
 const btn = document.getElementById("copy"), cmd = document.getElementById("cmd").textContent;
+if (navigator.share && matchMedia("(pointer: coarse)").matches) {   // a phone: hand the line to Messages, Mail, AirDrop…
+  document.documentElement.classList.add("can-share");
+  document.getElementById("share").addEventListener("click", () => navigator.share({ text: cmd }).catch(() => {}));
+}
 let undo;
 btn.addEventListener("click", async () => {
   try { await navigator.clipboard.writeText(cmd); }
