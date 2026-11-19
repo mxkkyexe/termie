@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""termie — pair this computer with the Termie iPhone app over Tailscale and OpenSSH.
+
+  termie [pair] [--port N]   show a one-time QR code (10 minutes, one phone)
+  termie devices             list paired phones
+  termie revoke NAME         unpair a phone
+  termie install             copy this script to ~/.local/bin/termie
+  termie claim TOKEN         (run by sshd for the phone during pairing; not for people)
+
+Python 3 standard library only, plus the qrencode binary. Nothing listens on the network:
+the phone reaches this computer through its ordinary SSH server on the tailnet.
+"""
+import base64, contextlib, datetime, getpass, hashlib, ipaddress, json, os, platform
+import re, secrets, shutil, socket, struct, subprocess, sys, tempfile, time
+from pathlib import Path
+from urllib.parse import urlencode
+try:
+    import fcntl
+except ImportError:   # Windows: no tmux, no POSIX shell for the phone to drive
+    sys.exit('termie runs on macOS and Linux. On Windows, run it inside WSL (Ubuntu), with Tailscale and OpenSSH installed there too.')
+
+VERSION = '1'
+PAIR_SECONDS = int(os.environ.get('TERMIE_PAIR_SECONDS', '600'))
+TAILNET = '100.64.0.0/10,fd7a:115c:a1e0::/48'   # where a phone on the tailnet connects from
+TAILNET_V4 = ipaddress.ip_network('100.64.0.0/10')
+PHONE_TAG, PAIR_TAG = 'termie-phone:', 'termie-pair:'
+NAME = re.compile(r'^[A-Za-z0-9._-]{1,32}$')
+TOKEN = re.compile(r'^[0-9a-f]{32}$')
+HOME = Path(os.environ.get('HOME', str(Path.home())))
+AUTH = HOME / '.ssh' / 'authorized_keys'
+STATE = HOME / '.local' / 'share' / 'termie'
+INSTALLED = HOME / '.local' / 'bin' / 'termie'
+# where it's published; piped straight into python3 there's no file to copy, so it fetches itself from here
+SELF_URL = 'https://mxkkyexe.github.io/termie/termie'
+
+# ---------- output: quiet, terminal-native; colour only on a real terminal ----------
+TTY = sys.stdout.isatty() and 'NO_COLOR' not in os.environ
+def paint(code, s): return f'\033[{code}m{s}\033[0m' if TTY else s
+def ok(label, detail=''): print(f'  {paint("32", "☒")} {label:<10} {paint("2", detail)}')
+def warn(label, detail): print(f'  {paint("33", "▣")} {label:<10} {detail}')
+class Fail(Exception): pass
+def fail(msg, fix=None):
+    raise Fail(msg + (f'\n\n  fix:  {fix}' if fix else ''))
+
+def run(*args, check=True, input=None):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, input=input)
+    except FileNotFoundError:
+        raise Fail(f'missing command: {args[0]}')
+    if check and r.returncode != 0:
+        raise Fail(f'{args[0]} failed: {(r.stderr or r.stdout).strip()}')
+    return r
+
+# ---------- what this computer is ----------
+def os_id():
+    if platform.system() == 'Darwin':
+        return 'macos'
+    if Path('/usr/share/omarchy').exists():
+        return 'omarchy'
+    try:
+        for line in Path('/etc/os-release').read_text().splitlines():
+            if line.startswith('ID='):
+                v = line[3:].strip().strip('"')
+                return v if NAME.match(v) else 'linux'
+    except OSError:
+        pass
+    return 'linux'
+
+def install_hint(pkgs):
+    """How to install packages here, as one command to copy."""
+    i = os_id()
+    if i == 'macos': return 'brew install ' + ' '.join(pkgs)
+    if i in ('omarchy', 'arch', 'manjaro', 'endeavouros'): return 'sudo pacman -S ' + ' '.join(pkgs)
+    if i in ('debian', 'ubuntu', 'pop', 'linuxmint'): return 'sudo apt install ' + ' '.join(pkgs)
+    if i in ('fedora', 'rhel', 'centos'): return 'sudo dnf install ' + ' '.join(pkgs)
+    return 'install: ' + ' '.join(pkgs)
+
+def ssh_hint():
+    i = os_id()
+    if i == 'macos': return 'System Settings → General → Sharing → turn on Remote Login'
+    if i in ('debian', 'ubuntu', 'pop', 'linuxmint'): return 'sudo apt install openssh-server && sudo systemctl enable --now ssh'
+    if i in ('fedora', 'rhel', 'centos'): return 'sudo dnf install openssh-server && sudo systemctl enable --now sshd'
+    return 'sudo pacman -S openssh && sudo systemctl enable --now sshd'
+
+def hostname():
+    name = socket.gethostname().split('.')[0]
+    if platform.system() == 'Darwin':
+        with contextlib.suppress(Fail):
+            name = run('scutil', '--get', 'ComputerName').stdout.strip() or name
+    return name[:64]
+
+def tailnet_ip():
+    if not shutil.which('tailscale'):
+        fail('Tailscale is not installed.', install_hint(['tailscale']) + '   then:  sudo tailscale up')
+    status = json.loads(run('tailscale', 'status', '--json').stdout)
+    if status.get('BackendState') != 'Running':
+        fail('Tailscale is not connected.', 'sudo tailscale up')
+    for ip in status.get('Self', {}).get('TailscaleIPs', []):
+        addr = ipaddress.ip_address(ip)
+        if addr.version == 4 and addr in TAILNET_V4:
+            return ip
+    fail('This computer has no Tailscale IPv4 address.', 'tailscale ip -4')
+
+def tailscale_ssh_on():
+    """Tailscale SSH answers port 22 itself and ignores authorized_keys, so pairing can't work through it."""
+    r = run('tailscale', 'debug', 'prefs', check=False)
+    with contextlib.suppress(ValueError):
+        return bool(json.loads(r.stdout).get('RunSSH'))
+    return False
+
+# ---------- SSH keys ----------
+def read_string(data, at):
+    if len(data) < at + 4: raise ValueError('short')
+    n = struct.unpack_from('>I', data, at)[0]; at += 4
+    if n > len(data) - at: raise ValueError('short')
+    return data[at:at + n], at + n
+
+def ed25519_blob(b64):
+    """The wire form of an Ed25519 public key, or ValueError."""
+    blob = base64.b64decode(b64, validate=True)
+    kind, at = read_string(blob, 0)
+    key, at = read_string(blob, at)
+    if kind != b'ssh-ed25519' or len(key) != 32 or at != len(blob):
+        raise ValueError('not an ed25519 key')
+    return blob
+
+def fingerprint(blob):
+    return 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip('=')
+
+def host_key(ip, port):
+    if not shutil.which('ssh-keyscan'):
+        fail('OpenSSH is not installed.', ssh_hint())
+    out = run('ssh-keyscan', '-T', '5', '-p', str(port), '-t', 'ed25519', ip, check=False).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and not line.startswith('#') and parts[1] == 'ssh-ed25519':
+            with contextlib.suppress(ValueError):
+                return ed25519_blob(parts[2])
+    fail(f'No SSH server with an Ed25519 key answers at {ip}:{port}.', ssh_hint())
+
+def phone_key(text):
+    """The phone's key as it sends it: exactly one line `ssh-ed25519 <base64> [name]`. Anything else is refused."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) != 1 or len(text) > 2048:
+        raise ValueError('expected exactly one key line')
+    parts = lines[0].split(None, 2)   # the name is the rest of the line: phones are called things like "Sam's iPhone"
+    if len(parts) < 2 or parts[0] != 'ssh-ed25519':
+        raise ValueError('expected: ssh-ed25519 <key> [name]')
+    blob = ed25519_blob(parts[1])
+    name = re.sub(r'-+', '-', re.sub(r'[^A-Za-z0-9._-]', '-', parts[2].strip()))[:32].strip('-.') if len(parts) == 3 else ''
+    return blob, name or 'phone-' + fingerprint(blob)[7:13]
+
+def private_seed(path):
+    """The 32-byte seed of an unencrypted OpenSSH Ed25519 private key file."""
+    body = base64.b64decode(''.join(l for l in Path(path).read_text().splitlines() if not l.startswith('-----')))
+    magic = b'openssh-key-v1\0'
+    if not body.startswith(magic): raise Fail('ssh-keygen wrote an unexpected key format')
+    cipher, at = read_string(body, len(magic))
+    kdf, at = read_string(body, at)
+    _, at = read_string(body, at)
+    if cipher != b'none' or kdf != b'none' or struct.unpack_from('>I', body, at)[0] != 1:
+        raise Fail('temporary key is not a single unencrypted key')
+    _, at = read_string(body, at + 4)
+    priv, _ = read_string(body, at)
+    kind, at = read_string(priv, 8)   # after two check integers
+    pub, at = read_string(priv, at)
+    both, _ = read_string(priv, at)
+    if kind != b'ssh-ed25519' or len(pub) != 32 or len(both) != 64 or both[32:] != pub:
+        raise Fail('temporary key is malformed')
+    return both[:32]
+
+# ---------- authorized_keys: locked, written whole, never touching lines that aren't ours ----------
+@contextlib.contextmanager
+def keys_locked():
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(STATE / 'lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        lines = AUTH.read_text().splitlines(keepends=True) if AUTH.exists() else []
+        box = {'lines': list(lines)}   # a copy: changes are judged against what was read
+        yield box
+        if box['lines'] != lines:
+            AUTH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=AUTH.parent, prefix='.authorized_keys.')
+            with os.fdopen(fd, 'w') as f:
+                f.write(''.join(l if l.endswith('\n') else l + '\n' for l in box['lines']))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, AUTH)
+
+def tagged(line, tag):
+    parts = line.split()
+    return bool(parts) and parts[-1].startswith(tag)
+
+def add_line(line):
+    with keys_locked() as k:
+        k['lines'].append(line + '\n')
+
+def remove_where(pred):
+    with keys_locked() as k:
+        before = len(k['lines'])
+        k['lines'] = [l for l in k['lines'] if not pred(l)]
+        return before - len(k['lines'])
+
+def phones():
+    lines = AUTH.read_text().splitlines() if AUTH.exists() else []
+    out = []
+    for l in lines:
+        if tagged(l, PHONE_TAG):
+            parts = l.split()
+            i = parts.index('ssh-ed25519') if 'ssh-ed25519' in parts else -1
+            with contextlib.suppress(ValueError, IndexError):
+                out.append((parts[-1][len(PHONE_TAG):], fingerprint(ed25519_blob(parts[i + 1]))))
+    return out
+
+# ---------- commands ----------
+def install(quiet=False):
+    INSTALLED.parent.mkdir(parents=True, exist_ok=True)
+    if not Path(__file__).is_file():   # curl … | python3 - pair
+        from urllib.request import urlopen
+        try:
+            src = urlopen(SELF_URL, timeout=20).read()
+        except OSError as e:
+            fail(f'could not download termie: {e}')
+        if not INSTALLED.exists() or INSTALLED.read_bytes() != src:
+            tmp = INSTALLED.with_suffix('.tmp'); tmp.write_bytes(src); tmp.chmod(0o755); tmp.replace(INSTALLED)
+    else:
+        me = Path(__file__).resolve()
+        if me != INSTALLED.resolve() and (not INSTALLED.exists() or INSTALLED.read_bytes() != me.read_bytes()):
+            shutil.copyfile(me, INSTALLED)
+            INSTALLED.chmod(0o755)
+    if not quiet:
+        print(f'installed: {INSTALLED}')
+        if str(INSTALLED.parent) not in os.environ.get('PATH', '').split(':'):
+            print(f'add it to your PATH:  export PATH="$HOME/.local/bin:$PATH"')
+
+def pair(port):
+    if not 1 <= port <= 65535:
+        fail('port must be 1–65535')
+    for tool, pkg in (('qrencode', 'qrencode'), ('ssh-keygen', 'openssh')):
+        if not shutil.which(tool):
+            fail(f'{tool} is not installed.', install_hint([pkg]))
+    print(paint('1', 'termie') + paint('2', ' · pair this computer') + '\n')
+    ip = tailnet_ip(); name = hostname()
+    ok('tailscale', f'{ip} · {name}')
+    if tailscale_ssh_on():
+        fail('Tailscale SSH is on; it answers port 22 itself and ignores the key Termie installs.', 'sudo tailscale set --ssh=false')
+    hk = host_key(ip, port)
+    ok('ssh', f'port {port} · {fingerprint(hk)}')
+    tmux = run('tmux', '-V', check=False).stdout.strip() if shutil.which('tmux') else ''
+    ok('tmux', tmux) if tmux else warn('tmux', f'not installed; Termie will open a plain shell  ({install_hint(["tmux"])})')
+
+    install(quiet=True)
+    if any(c in str(INSTALLED) for c in '"\\\n'):
+        fail(f'{INSTALLED} has a quote or backslash in its path; sshd cannot run it safely')
+    token = secrets.token_hex(16)
+    tickets = STATE / 'pairing'; tickets.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (tickets / token).write_text(str(int(time.time()) + PAIR_SECONDS))
+    with tempfile.TemporaryDirectory(prefix='termie-') as d:
+        key = Path(d) / 'pair'
+        run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', '', '-f', str(key))
+        seed = private_seed(key)
+        pub = key.with_suffix('.pub').read_text().split()[1]
+    expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=PAIR_SECONDS)
+    # the one-time key can do one thing: hand the phone's own key to `termie claim`, from the tailnet, for 10 minutes
+    add_line(f'restrict,from="{TAILNET}",expiry-time="{expiry:%Y%m%d%H%M%S}Z",command="{INSTALLED} claim {token}" '
+             f'ssh-ed25519 {pub} {PAIR_TAG}{token}')
+    b64u = lambda b: base64.urlsafe_b64encode(b).decode().rstrip('=')
+    url = 'termie://pair?' + urlencode({'v': VERSION, 'h': ip, 'p': port, 'u': getpass.getuser(), 'n': name,
+                                        'o': os_id(), 'k': b64u(hk), 'c': b64u(seed)})
+    try:
+        print()
+        sys.stdout.write(run('qrencode', '-t', 'ANSIUTF8', '-m', '2', url).stdout)   # dark modules on light, whatever the terminal theme
+        print(f'\n  scan it in Termie, or paste this line:\n  {paint("2", url)}\n')
+        mins = max(1, PAIR_SECONDS // 60)
+        print(paint('2', f'  the code works once, for {mins} minute{"s" if mins != 1 else ""}; it is a key, so show it only to your phone'))
+        done = tickets / (token + '.paired')
+        deadline = time.monotonic() + PAIR_SECONDS
+        while time.monotonic() < deadline:
+            if done.exists():
+                who = done.read_text().strip()
+                print(('\r' if TTY else '\n') + f'  {paint("32", "☒")} paired with {paint("1", who)}' + ' ' * 20)
+                print(paint('2', f'\n  unpair it any time:  termie revoke {who}'))
+                return 0
+            if TTY:
+                left = int(deadline - time.monotonic())
+                sys.stdout.write(f'\r  {paint("32", "⬢")} waiting for your phone · {left // 60}:{left % 60:02d}  {paint("2", "(ctrl-c to stop)")}')
+                sys.stdout.flush()
+            time.sleep(0.25)
+        fail('The code expired. Run termie again for a new one.')
+    except KeyboardInterrupt:
+        print('\n  stopped; the code no longer works')
+        return 130
+    finally:   # however it ends, the one-time key goes
+        remove_where(lambda l: l.split()[-1:] == [PAIR_TAG + token])
+        for f in (tickets / token, tickets / (token + '.paired')):
+            f.unlink(missing_ok=True)
+
+def claim(token):
+    """Run by sshd as the one-time key's forced command. Reads the phone's key; first claim wins."""
+    if not TOKEN.match(token):
+        fail('bad ticket')
+    ticket = STATE / 'pairing' / token
+    try:
+        deadline = int(ticket.read_text().strip())
+        ticket.unlink()   # only one claim can win
+    except (FileNotFoundError, ValueError):
+        fail('this code was already used or has expired')
+    if time.time() > deadline:
+        fail('this code has expired')
+    try:
+        blob, name = phone_key(sys.stdin.readline(4096))   # one line: the phone can't always signal end-of-input
+    except ValueError as e:
+        fail(f'not a usable key: {e}')
+    taken = {n for n, _ in phones()}
+    base, i = name, 2
+    while name in taken:
+        name = f'{base[:28]}-{i}'; i += 1
+    key = base64.b64encode(blob).decode()
+    with keys_locked() as k:
+        k['lines'] = [l for l in k['lines'] if l.split()[-1:] != [PAIR_TAG + token]]
+        k['lines'].append(f'from="{TAILNET}",no-agent-forwarding,no-X11-forwarding ssh-ed25519 {key} {PHONE_TAG}{name}\n')
+    (STATE / 'pairing' / (token + '.paired')).write_text(name)
+    print(f'ok {name}')
+    return 0
+
+def devices():
+    ps = phones()
+    if not ps:
+        print('no phones paired; run termie to pair one')
+    for name, fp in ps:
+        print(f'  {name:<24} {paint("2", fp)}')
+    return 0
+
+def revoke(name):
+    if not NAME.match(name or ''):
+        fail('name must be letters, digits, . _ or -')
+    n = remove_where(lambda l: l.split()[-1:] == [PHONE_TAG + name])
+    if not n:
+        fail(f'no phone named {name}; see termie devices')
+    print(f'revoked {name}; it can no longer connect')
+    return 0
+
+def main(argv):
+    cmd, rest = (argv[0], argv[1:]) if argv and not argv[0].startswith('-') else ('pair', argv)
+    try:
+        if cmd == 'pair':
+            port = 22
+            if rest[:1] == ['--port'] and len(rest) == 2 and rest[1].isdigit(): port = int(rest[1])
+            elif rest: fail('usage: termie pair [--port N]')
+            return pair(port)
+        if cmd == 'claim' and len(rest) == 1: return claim(rest[0])
+        if cmd == 'devices' and not rest: return devices()
+        if cmd == 'revoke' and len(rest) == 1: return revoke(rest[0])
+        if cmd == 'install' and not rest: return install() or 0
+        print(__doc__.strip()); return 0 if cmd in ('help', '-h', '--help') else 2
+    except Fail as e:
+        print(f'\n  {paint("31", "×")} {e}', file=sys.stderr)
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

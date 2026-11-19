@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>termie</title>
+<meta name="description" content="Your computer's terminal on your iPhone, over Tailscale.">
+<meta name="theme-color" content="#000000">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000; --fg: #f2f2f2; --fg2: #a6a6a6; --fg3: #5c5c5c; --line: #3a3a3a; --mint: #5fb88f; color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: var(--bg); }
+  body { color: var(--fg); font: 15px/1.5 "JetBrains Mono", ui-monospace, Menlo, monospace; -webkit-font-smoothing: antialiased;
+         display: grid; place-items: center; padding: 24px 16px; }
+  main { width: 100%; max-width: 560px; display: flex; flex-direction: column; align-items: center; }
+  h1 { font-size: 56px; font-weight: 700; letter-spacing: -1.7px; line-height: 1; display: flex; align-items: flex-end; gap: 4px; }
+  h1 canvas { width: 22px; height: 22px; margin-bottom: 4px; }
+  .lede { color: var(--fg2); margin: 18px 0 40px; text-align: center; }
+  .box { width: 100%; border: 1px solid var(--line); display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; }
+  .box code { flex: 1; font: inherit; font-size: 14px; overflow-wrap: anywhere; }
+  .box code .p { color: var(--fg3); }
+  button { font: inherit; font-size: 13px; color: var(--fg2); background: none; border: 1px solid var(--line); padding: 4px 12px;
+           cursor: pointer; flex: none; transition: color 160ms ease, border-color 160ms ease; }
+  button:hover { color: var(--fg); border-color: var(--fg3); }
+  button:active { transform: scale(0.97); }
+  button.done { color: var(--mint); border-color: var(--mint); }
+  .foot { color: var(--fg3); font-size: 13px; margin-top: 12px; align-self: flex-start; }
+  @media (max-width: 420px) { h1 { font-size: 44px; } h1 canvas { width: 18px; height: 18px; margin-bottom: 3px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>termie<canvas id="cube" aria-hidden="true"></canvas></h1>
+  <p class="lede">your terminal, pocket-sized.</p>
+  <div class="box">
+    <code><span class="p">$ </span><span id="cmd">curl -fsSL https://mxkkyexe.github.io/termie/install.sh | sh</span></code>
+    <button id="copy" type="button">copy</button>
+  </div>
+  <p class="foot">mac or linux · needs tailscale and ssh · on windows, inside wsl</p>
+</main>
+<script>
+// The app's cube: a real cube seen isometrically, tipping like a die (up, left, down, right) with a 2 s rest after each.
+const iso = mul(rot([1, 0, 0], -35.264), rot([0, 1, 0], 45));
+const upright = [0, 0.8165, -0.5774];
+const cycle = [
+  { axis: [1, 0, 0], deg: 180, ms: 600, local: [[0, 0, 1], [0, -1, 0], [1, 0, 0]] },
+  { axis: upright, deg: -90, ms: 420, local: [[0, 0, -1], [0, 1, 0], [1, 0, 0]] },
+  { axis: [1, 0, 0], deg: -180, ms: 600, local: [[0, 0, 1], [0, -1, 0], [1, 0, 0]] },
+  { axis: upright, deg: 90, ms: 420, local: [[0, 0, 1], [0, 1, 0], [-1, 0, 0]] },
+];
+const rest = 2000, loop = 2 * cycle.reduce((a, t) => a + t.ms, 0) + 8 * rest;
+const faces = [   // normal, corners, colour (0 top, 1 side a, 2 side b)
+  [[0, 0, 1], [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]], 1],
+  [[1, 0, 0], [[1, -1, 1], [1, -1, -1], [1, 1, -1], [1, 1, 1]], 2],
+  [[0, 0, -1], [[1, -1, -1], [-1, -1, -1], [-1, 1, -1], [1, 1, -1]], 1],
+  [[-1, 0, 0], [[-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1]], 2],
+  [[0, -1, 0], [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]], 0],
+  [[0, 1, 0], [[-1, 1, 1], [1, 1, 1], [1, 1, -1], [-1, 1, -1]], 2],
+];
+const colours = ["#a3e6c4", "#5fb88f", "#3b8462"];
+
+function mul(a, b) { return a.map((row, i) => [0, 1, 2].map(j => row[0] * b[0][j] + row[1] * b[1][j] + row[2] * b[2][j])); }
+function apply(m, v) { return m.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]); }
+function rot(axis, deg) {
+  const l = Math.hypot(...axis), [x, y, z] = axis.map(c => c / l), a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a), t = 1 - c;
+  return [[t*x*x + c, t*x*y - s*z, t*x*z + s*y], [t*x*y + s*z, t*y*y + c, t*y*z - s*x], [t*x*z - s*y, t*y*z + s*x, t*z*z + c]];
+}
+const ease = x => x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+function pose(ms) {
+  let t = ms % loop, s = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let i = 0; i < 8; i++) {
+    const tip = cycle[i % 4];
+    if (t < tip.ms) return mul(mul(rot(tip.axis, tip.deg * ease(t / tip.ms)), iso), s);
+    s = mul(tip.local, s);
+    t -= tip.ms + rest;
+    if (t < 0) return mul(iso, s);
+  }
+  return iso;
+}
+
+const canvas = document.getElementById("cube"), ctx = canvas.getContext("2d");
+const still = matchMedia("(prefers-reduced-motion: reduce)");
+function draw(ms) {
+  const box = canvas.clientWidth, dpr = devicePixelRatio || 1;
+  if (canvas.width !== Math.round(box * dpr)) { canvas.width = canvas.height = Math.round(box * dpr); }
+  const size = canvas.width, h = size / 1.6 / 2, c = size / 2, m = still.matches ? iso : pose(ms);
+  ctx.clearRect(0, 0, size, size);
+  for (const [n, corners, role] of faces) {
+    if (apply(m, n)[2] <= 1e-6) continue;   // facing away: never drawn
+    ctx.beginPath();
+    corners.forEach((v, i) => { const p = apply(m, v); i ? ctx.lineTo(c + p[0] * h, c + p[1] * h) : ctx.moveTo(c + p[0] * h, c + p[1] * h); });
+    ctx.closePath(); ctx.fillStyle = colours[role]; ctx.fill();
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+const btn = document.getElementById("copy"), cmd = document.getElementById("cmd").textContent;
+let undo;
+btn.addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(cmd); }
+  catch { const r = document.createRange(); r.selectNodeContents(document.getElementById("cmd")); getSelection().removeAllRanges(); getSelection().addRange(r); document.execCommand("copy"); }
+  btn.textContent = "copied"; btn.classList.add("done");
+  clearTimeout(undo); undo = setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("done"); }, 1600);
+});
+</script>
+</body>
+</html>
