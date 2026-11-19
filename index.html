@@ -32,7 +32,14 @@
   button:active { transform: scale(0.97); }
   button.done { color: var(--mint); border-color: var(--mint); }
   #share { display: none; }
-  .foot { color: var(--fg3); font-size: 13px; margin-top: 12px; align-self: flex-start; }
+  .after { color: var(--fg2); font-size: 13px; margin-top: 12px; align-self: flex-start; }
+  .needs { align-self: stretch; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line); }
+  .needs h2 { font: inherit; font-size: 13px; color: var(--fg3); font-weight: 400; margin-bottom: 10px; }
+  .needs ul { list-style: none; padding: 0; display: grid; gap: 8px; font-size: 13px; }
+  .needs li { display: grid; grid-template-columns: 18px 1fr; color: var(--fg2); }
+  .needs li::before { content: ""; width: 7px; height: 8px; margin-top: 6px; background: var(--fg3);   /* Termie's hexagon bullet */
+                     clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%); }
+  .needs li span { color: var(--fg3); }
   @media (max-width: 560px) {
     body { place-items: start center; padding: max(12vh, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
     #cube { width: 190px; height: 190px; }
@@ -58,7 +65,15 @@
       <button id="share" type="button">send to computer</button>
     </div>
   </div>
-  <p class="foot">mac or linux · needs tailscale and ssh · on windows, inside wsl</p>
+  <p class="after">it installs termie, then shows a qr code. scan it in the app.</p>
+  <section class="needs">
+    <h2>you'll need</h2>
+    <ul>
+      <li><p>a mac or linux computer <span>· on windows, inside wsl</span></p></li>
+      <li><p>tailscale on it and on your iphone <span>· the same account</span></p></li>
+      <li><p>ssh turned on, python 3 and qrencode <span>· if one's missing, termie says what to run</span></p></li>
+    </ul>
+  </section>
 </main>
 <script>
 // ---- the app's cube: seen isometrically, tipping like a die (up, left, down, right), resting 2 s after each ----
