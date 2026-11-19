@@ -226,17 +226,47 @@ const commands = {
   windows: { where: "in powershell on your pc:", prompt: "> ", html: 'wsl -e sh -c "curl -fsSL https://<wbr>mxkkyexe.github.io/<wbr>termie/<wbr>install.sh | sh"' },
 };
 let cmd = cmdEl.textContent;
-function choose(os) {
-  const c = commands[os];
+const glide = { duration: 320, easing: "cubic-bezier(0.23, 1, 0.32, 1)" };
+// an element goes from the height it had to the height it has now, so everything below moves smoothly too;
+// a second tap mid-way starts from wherever it had got to
+function regrow(el, from, to, done) {
+  el.getAnimations().forEach(a => a.cancel());
+  if (Math.abs(to - from) < 0.5) { done?.(); return; }
+  el.style.overflow = "hidden";
+  const a = el.animate([{ height: from + "px" }, { height: to + "px" }], glide);
+  let over = false;
+  const end = () => { if (over || a.playState === "idle") return; over = true; a.cancel(); el.style.overflow = ""; done?.(); };   // idle: a newer tap took over
+  a.onfinish = end;
+  setTimeout(end, glide.duration + 40);   // backstop: the line must never be left showing
+}
+function choose(os, animate = true) {
+  const c = commands[os], box = document.querySelector(".box"), list = document.querySelector(".needs ul"), wsl = document.getElementById("wsl");
+  const moving = animate && !still.matches;
+  const boxWas = box.getBoundingClientRect().height, listWas = list.getBoundingClientRect().height;   // as they are on screen now, mid-glide too
+  [box, list, wsl].forEach(el => el.getAnimations().forEach(a => a.cancel()));
   document.querySelector(".tabs").dataset.os = os;
   document.querySelectorAll(".tabs button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.os === os)));
   document.getElementById("where").textContent = c.where;
   document.getElementById("prompt").textContent = c.prompt;
   cmdEl.innerHTML = c.html; cmd = cmdEl.textContent;
-  document.getElementById("wsl").hidden = os !== "windows";
+  const show = os === "windows";
+  wsl.hidden = !show;
+  if (!moving) return;
+  for (const el of [document.getElementById("where"), box.querySelector("code")])
+    el.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "ease-out" });
+  regrow(box, boxWas, box.getBoundingClientRect().height);
+  const listIs = list.getBoundingClientRect().height;
+  if (show) {   // the extra line fades in while the list makes room for it
+    regrow(list, listWas, listIs);
+    wsl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 320, delay: 80, easing: "ease-out", fill: "backwards" });
+  } else {      // it stays while it fades and the list closes over it, then goes
+    wsl.hidden = false;
+    wsl.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 180, easing: "ease-in", fill: "forwards" });
+    regrow(list, listWas, listIs, () => { wsl.hidden = true; wsl.getAnimations().forEach(a => a.cancel()); });
+  }
 }
-document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => choose(b.dataset.os)));
-if (/Windows/i.test(navigator.userAgent)) choose("windows");   // a visitor on a PC starts on its tab
+document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => { if (b.getAttribute("aria-pressed") !== "true") choose(b.dataset.os); }));
+if (/Windows/i.test(navigator.userAgent)) choose("windows", false);   // a visitor on a PC starts on its tab
 requestAnimationFrame(() => requestAnimationFrame(() => document.querySelector(".tabs").classList.add("ready")));
 if (navigator.share && matchMedia("(pointer: coarse)").matches) {   // a phone: hand the line to Messages, Mail, AirDrop…
   document.documentElement.classList.add("can-share");
