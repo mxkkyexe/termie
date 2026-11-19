@@ -317,7 +317,7 @@ def claim(token):
     key = base64.b64encode(blob).decode()
     with keys_locked() as k:
         k['lines'] = [l for l in k['lines'] if l.split()[-1:] != [PAIR_TAG + token]]
-        k['lines'].append(f'from="{TAILNET}",no-agent-forwarding,no-X11-forwarding ssh-ed25519 {key} {PHONE_TAG}{name}\n')
+        k['lines'].append(f'from="{TAILNET}",no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 {key} {PHONE_TAG}{name}\n')
     (STATE / 'pairing' / (token + '.paired')).write_text(name)
     print(f'ok {name}')
     return 0
