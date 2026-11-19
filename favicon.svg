@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- the Termie cube at rest, seen isometrically: top, left and right faces -->
+  <path fill="#a3e6c4" d="M16 2 28.12 9 16 16 3.88 9Z"/>
+  <path fill="#3b8462" d="M3.88 9 16 16v14L3.88 23Z"/>
+  <path fill="#5fb88f" d="M28.12 9 16 16v14l12.12-7Z"/>
+</svg>
